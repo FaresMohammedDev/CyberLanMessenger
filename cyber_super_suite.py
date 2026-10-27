@@ -696,11 +696,32 @@ class CyberSuperSuiteApp:
         post_box = tk.LabelFrame(parent, text=" [ POST A NEW STORY ] ", bg=COLOR_PANEL_ALT, fg=COLOR_GREEN, font=FONT_BOLD, bd=1, relief="solid")
         post_box.pack(fill="x", padx=20, pady=8)
 
-        self.entry_story_text = tk.Entry(post_box, bg=COLOR_ENTRY_BG, fg="#ffffff", font=FONT_MAIN)
-        self.entry_story_text.pack(fill="x", padx=10, pady=8, ipady=3)
+        self.entry_story_text = tk.Entry(post_box, bg=COLOR_ENTRY_BG, fg="#ffffff", font=("Segoe UI", 11), bd=1, relief="solid")
+        self.entry_story_text.pack(fill="x", padx=10, pady=8, ipady=4)
 
-        btn_post = tk.Button(post_box, text="🚀 Post Story (Expires in 24h)", bg="#02381b", fg=COLOR_GREEN, font=FONT_BOLD, command=self.post_story)
-        btn_post.pack(pady=(0, 8))
+        # Auto-detect RTL/LTR while typing story
+        def on_story_entry_key(event=None):
+            val = self.entry_story_text.get()
+            if is_arabic_text(val):
+                self.entry_story_text.config(justify="right")
+            else:
+                self.entry_story_text.config(justify="left")
+
+        self.entry_story_text.bind("<KeyRelease>", on_story_entry_key)
+
+        btn_ctrl = tk.Frame(post_box, bg=COLOR_PANEL_ALT)
+        btn_ctrl.pack(pady=(0, 8))
+
+        def toggle_story_dir():
+            curr = self.entry_story_text.cget("justify")
+            new_dir = "left" if curr == "right" else "right"
+            self.entry_story_text.config(justify=new_dir)
+
+        btn_dir = tk.Button(btn_ctrl, text="🌐 RTL / LTR", bg="#1e293b", fg="#7dd3fc", font=("Consolas", 8, "bold"), bd=1, relief="solid", cursor="hand2", command=toggle_story_dir)
+        btn_dir.pack(side="left", padx=6)
+
+        btn_post = tk.Button(btn_ctrl, text="🚀 Post Story (Expires in 24h)", bg="#02381b", fg=COLOR_GREEN, font=FONT_BOLD, cursor="hand2", command=self.post_story)
+        btn_post.pack(side="left", padx=6)
 
         tk.Label(parent, text="ACTIVE STORIES ON NETWORK:", fg=COLOR_CYAN, bg=COLOR_PANEL, font=FONT_BOLD).pack(anchor="w", padx=20, pady=(10, 4))
         stories = self.db.get_active_stories()
@@ -710,17 +731,30 @@ class CyberSuperSuiteApp:
         for s in stories:
             c = tk.Frame(st_frame, bg=COLOR_PANEL, bd=1, relief="solid")
             c.pack(fill="x", padx=8, pady=4)
-            tk.Label(c, text=f"🟣 {s['author_nick']}: \"{s['content_text']}\"", fg=COLOR_TEXT, bg=COLOR_PANEL, font=FONT_BOLD).pack(side="left", padx=10, pady=8)
-            
-            # Admin delete button
-            if self.is_admin:
-                btn_del = tk.Button(
-                    c, text="🗑️ Delete", bg="#450a0a", fg="#fca5a5", font=("Consolas", 8, "bold"),
-                    command=lambda sid=s["story_id"]: self.admin_delete_story(sid)
-                )
-                btn_del.pack(side="right", padx=6)
+            is_ar = is_arabic_text(s['content_text'])
 
-            tk.Label(c, text=f"Expires: {s['expires_at'][:16]}", fg=COLOR_DIM, bg=COLOR_PANEL, font=("Consolas", 8)).pack(side="right", padx=10)
+            if is_ar:
+                # RTL Card Layout: Author on the right, content next to it with \u202b...\u202c
+                tk.Label(c, text=f": {s['author_nick']} 🟣", fg=COLOR_CYAN, bg=COLOR_PANEL, font=FONT_BOLD).pack(side="right", padx=(0, 10), pady=8)
+                tk.Label(c, text=f"\"\u202b{s['content_text']}\u202c\"", fg=COLOR_TEXT, bg=COLOR_PANEL, font=("Segoe UI", 11, "bold")).pack(side="right", padx=(0, 4), pady=8)
+                if self.is_admin:
+                    btn_del = tk.Button(
+                        c, text="🗑️ Delete", bg="#450a0a", fg="#fca5a5", font=("Consolas", 8, "bold"),
+                        command=lambda sid=s["story_id"]: self.admin_delete_story(sid)
+                    )
+                    btn_del.pack(side="left", padx=6)
+                tk.Label(c, text=f"Expires: {s['expires_at'][:16]}", fg=COLOR_DIM, bg=COLOR_PANEL, font=("Consolas", 8)).pack(side="left", padx=10)
+            else:
+                # LTR Card Layout
+                tk.Label(c, text=f"🟣 {s['author_nick']}:", fg=COLOR_CYAN, bg=COLOR_PANEL, font=FONT_BOLD).pack(side="left", padx=10, pady=8)
+                tk.Label(c, text=f"\"{s['content_text']}\"", fg=COLOR_TEXT, bg=COLOR_PANEL, font=FONT_BOLD).pack(side="left", padx=4, pady=8)
+                if self.is_admin:
+                    btn_del = tk.Button(
+                        c, text="🗑️ Delete", bg="#450a0a", fg="#fca5a5", font=("Consolas", 8, "bold"),
+                        command=lambda sid=s["story_id"]: self.admin_delete_story(sid)
+                    )
+                    btn_del.pack(side="right", padx=6)
+                tk.Label(c, text=f"Expires: {s['expires_at'][:16]}", fg=COLOR_DIM, bg=COLOR_PANEL, font=("Consolas", 8)).pack(side="right", padx=10)
 
     def post_story(self):
         val = self.entry_story_text.get().strip()
@@ -862,7 +896,9 @@ class CyberSuperSuiteApp:
                     }
 
             # Direction detection: RTL for Arabic, LTR for English
-            dir_tag = "RTL" if is_arabic_text(content) else "LTR"
+            is_ar = is_arabic_text(content)
+            dir_tag = "RTL" if is_ar else "LTR"
+            formatted_content = f"\u202b{content}\u202c" if is_ar else content
 
             # Timestamp and Sender header
             self.txt_messages.insert("end", f"[{ts[-8:]}] ", ("TIME", dir_tag))
@@ -876,7 +912,7 @@ class CyberSuperSuiteApp:
                 self._insert_file_attachment_card(file_meta)
                 self.txt_messages.insert("end", "\n", dir_tag)
             else:
-                self.txt_messages.insert("end", f": {content}\n", dir_tag)
+                self.txt_messages.insert("end", f": {formatted_content}\n", dir_tag)
 
             self.txt_messages.see("end")
         except (tk.TclError, AttributeError):
