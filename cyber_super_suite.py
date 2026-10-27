@@ -84,6 +84,19 @@ def xor_cipher(data_bytes):
     return bytes([b ^ XOR_KEY for b in data_bytes])
 
 
+def is_arabic_text(text):
+    if not text:
+        return False
+    for ch in str(text):
+        if ('\u0600' <= ch <= '\u06ff' or
+            '\u0750' <= ch <= '\u077f' or
+            '\u08a0' <= ch <= '\u08ff' or
+            '\ufb50' <= ch <= '\ufdff' or
+            '\ufe70' <= ch <= '\ufeff'):
+            return True
+    return False
+
+
 # ----------------- AUTHENTICATION MODAL -----------------
 class AuthGateModal:
     def __init__(self, parent):
@@ -413,6 +426,8 @@ class CyberSuperSuiteApp:
         self.txt_messages.tag_configure("BIO_TAG", foreground="#94a3b8", font=("Consolas", 8))
         self.txt_messages.tag_configure("REPLY_BADGE", foreground="#38bdf8", font=("Consolas", 9, "italic"))
         self.txt_messages.tag_configure("MILESTONE", foreground="#f43f5e", font=("Consolas", 10, "bold"))
+        self.txt_messages.tag_configure("RTL", justify="right")
+        self.txt_messages.tag_configure("LTR", justify="left")
 
         # Reply Banner
         self.reply_banner = tk.Frame(parent, bg="#0c233c", bd=1, relief="solid")
@@ -430,9 +445,28 @@ class CyberSuperSuiteApp:
         btn_stick = tk.Button(input_bar, text="⭐ Stickers", bg="#1e293b", fg=COLOR_YELLOW, font=FONT_BOLD, bd=1, relief="solid", cursor="hand2", command=lambda: self.switch_tab("STICKERS"))
         btn_stick.pack(side="left", padx=2, pady=6)
 
+        # RTL / LTR Direction Toggle Button
+        def toggle_entry_direction():
+            curr = self.entry_message.cget("justify")
+            new_dir = "left" if curr == "right" else "right"
+            self.entry_message.config(justify=new_dir)
+
+        btn_dir = tk.Button(input_bar, text="🌐 RTL/LTR", bg="#1e293b", fg="#7dd3fc", font=("Consolas", 8, "bold"), bd=1, relief="solid", cursor="hand2", command=toggle_entry_direction)
+        btn_dir.pack(side="left", padx=2, pady=6)
+
         self.entry_message = tk.Entry(input_bar, bg=COLOR_ENTRY_BG, fg="#ffffff", insertbackground=COLOR_GREEN, font=("Segoe UI", 11), bd=1, relief="solid")
         self.entry_message.pack(side="left", fill="x", expand=True, padx=6, pady=6, ipady=3)
         self.entry_message.bind("<Return>", lambda e: self.send_chat_message())
+
+        # Auto-detect RTL/LTR while typing in entry
+        def on_entry_keyrelease(event=None):
+            val = self.entry_message.get()
+            if is_arabic_text(val):
+                self.entry_message.config(justify="right")
+            else:
+                self.entry_message.config(justify="left")
+
+        self.entry_message.bind("<KeyRelease>", on_entry_keyrelease)
 
         btn_send = tk.Button(input_bar, text="🚀 SEND", bg="#02381b", fg=COLOR_GREEN, font=FONT_BOLD, bd=1, relief="solid", padx=15, cursor="hand2", command=self.send_chat_message)
         btn_send.pack(side="right", padx=(0, 6), pady=6)
@@ -727,8 +761,8 @@ class CyberSuperSuiteApp:
             btn.grid(row=i//4, column=i%4, padx=8, pady=8)
 
     def send_sticker(self, symbol):
-        self.send_chat_message(custom_text=f"[STICKER: {symbol}]", msg_type="STICKER")
         self.switch_tab("PUBLIC")
+        self.send_chat_message(custom_text=f"[STICKER: {symbol}]", msg_type="STICKER")
 
     def add_custom_sticker_dialog(self):
         name = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.gif")])
@@ -774,65 +808,79 @@ class CyberSuperSuiteApp:
         tk.Button(box, text="💾 Save Profile to Database", bg="#02381b", fg=COLOR_GREEN, font=FONT_BOLD, padx=15, pady=6, command=save_p).pack(pady=(0, 15))
 
     # ----------------- CHAT & INTERACTIVE ATTACHMENTS -----------------
+    def has_active_chat_widget(self):
+        try:
+            return hasattr(self, "txt_messages") and self.txt_messages and self.txt_messages.winfo_exists()
+        except Exception:
+            return False
+
     def load_history_for_active_view(self):
-        if not hasattr(self, "txt_messages"): return
-        self.txt_messages.delete("1.0", "end")
+        if not self.has_active_chat_widget(): return
+        try:
+            self.txt_messages.delete("1.0", "end")
 
-        target_type = "PUBLIC" if self.active_tab == "PUBLIC" else "GROUP"
-        target_id = "ALL" if target_type == "PUBLIC" else self.current_group_id
-        if not target_id: return
+            target_type = "PUBLIC" if self.active_tab == "PUBLIC" else "GROUP"
+            target_id = "ALL" if target_type == "PUBLIC" else self.current_group_id
+            if not target_id: return
 
-        msgs = self.db.get_messages(target_type, target_id, limit=50)
-        for m in msgs:
-            ts = m["timestamp"]
-            sender = m["sender_nick"]
-            reply_to = m["reply_to"]
-            content = m["content"]
-            is_me = m["is_me"]
-            mtype = m.get("msg_type", "TEXT")
-            fmeta = m.get("file_meta")
+            msgs = self.db.get_messages(target_type, target_id, limit=50)
+            for m in msgs:
+                ts = m["timestamp"]
+                sender = m["sender_nick"]
+                reply_to = m["reply_to"]
+                content = m["content"]
+                is_me = m["is_me"]
+                mtype = m.get("msg_type", "TEXT")
+                fmeta = m.get("file_meta")
 
-            self.render_single_message(sender, content, ts, is_me, reply_to, mtype, fmeta)
+                self.render_single_message(sender, content, ts, is_me, reply_to, mtype, fmeta)
 
-        self.txt_messages.see("end")
+            self.txt_messages.see("end")
+        except (tk.TclError, AttributeError):
+            pass
 
     def render_single_message(self, sender, content, ts, is_me, reply_to=None, mtype="TEXT", file_meta=None):
-        if not hasattr(self, "txt_messages"): return
+        if not self.has_active_chat_widget(): return
+        try:
+            # Parse file_meta if string
+            if file_meta and isinstance(file_meta, str):
+                try:
+                    file_meta = json.loads(file_meta)
+                except Exception:
+                    file_meta = None
 
-        # Parse file_meta if string
-        if file_meta and isinstance(file_meta, str):
-            try:
-                file_meta = json.loads(file_meta)
-            except Exception:
-                file_meta = None
+            # Fallback detection for older attachment text formats
+            if (mtype == "FILE" or "FILE ATTACHMENT:" in content) and not file_meta:
+                import re
+                m = re.search(r"FILE ATTACHMENT:\s*([^\s(]+)", content)
+                if m:
+                    fname = m.group(1).strip()
+                    file_meta = {
+                        "filename": fname,
+                        "size_mb": 0.04,
+                        "url": f"http://{self.local_ip}:{self.media_port}/files/{fname}"
+                    }
 
-        # Fallback detection for older attachment text formats
-        if (mtype == "FILE" or "FILE ATTACHMENT:" in content) and not file_meta:
-            import re
-            m = re.search(r"FILE ATTACHMENT:\s*([^\s(]+)", content)
-            if m:
-                fname = m.group(1).strip()
-                file_meta = {
-                    "filename": fname,
-                    "size_mb": 0.04,
-                    "url": f"http://{self.local_ip}:{self.media_port}/files/{fname}"
-                }
+            # Direction detection: RTL for Arabic, LTR for English
+            dir_tag = "RTL" if is_arabic_text(content) else "LTR"
 
-        # Timestamp and Sender header
-        self.txt_messages.insert("end", f"[{ts[-8:]}] ", "TIME")
-        tag = "ME_TAG" if is_me else "PEER_TAG"
-        self.txt_messages.insert("end", f"<{sender}>", tag)
-        if reply_to:
-            self.txt_messages.insert("end", f" ↳ (Replying to @{reply_to})", "REPLY_BADGE")
+            # Timestamp and Sender header
+            self.txt_messages.insert("end", f"[{ts[-8:]}] ", ("TIME", dir_tag))
+            tag = "ME_TAG" if is_me else "PEER_TAG"
+            self.txt_messages.insert("end", f"<{sender}>", (tag, dir_tag))
+            if reply_to:
+                self.txt_messages.insert("end", f" ↳ (Replying to @{reply_to})", ("REPLY_BADGE", dir_tag))
 
-        if mtype == "FILE" or file_meta:
-            self.txt_messages.insert("end", ":\n")
-            self._insert_file_attachment_card(file_meta)
-            self.txt_messages.insert("end", "\n")
-        else:
-            self.txt_messages.insert("end", f": {content}\n")
+            if mtype == "FILE" or file_meta:
+                self.txt_messages.insert("end", ":\n", dir_tag)
+                self._insert_file_attachment_card(file_meta)
+                self.txt_messages.insert("end", "\n", dir_tag)
+            else:
+                self.txt_messages.insert("end", f": {content}\n", dir_tag)
 
-        self.txt_messages.see("end")
+            self.txt_messages.see("end")
+        except (tk.TclError, AttributeError):
+            pass
 
     def _insert_file_attachment_card(self, file_meta):
         if not file_meta: return
@@ -1004,11 +1052,14 @@ class CyberSuperSuiteApp:
         }
         self.send_packet(pkt)
 
-        if hasattr(self, "txt_messages"):
-            self.render_single_message(self.my_nick, text, ts, True, reply_to_nick, msg_type, file_meta)
-            if is_milestone:
-                self.txt_messages.insert("end", f"🎉 [STREAK MILESTONE: {new_streak} DAYS! Total Messages: {tot_msgs}!]\n", "MILESTONE")
-            self.txt_messages.see("end")
+        if self.has_active_chat_widget():
+            try:
+                self.render_single_message(self.my_nick, text, ts, True, reply_to_nick, msg_type, file_meta)
+                if is_milestone:
+                    self.txt_messages.insert("end", f"🎉 [STREAK MILESTONE: {new_streak} DAYS! Total Messages: {tot_msgs}!]\n", "MILESTONE")
+                self.txt_messages.see("end")
+            except (tk.TclError, AttributeError):
+                pass
 
         if hasattr(self, "entry_message"):
             self.entry_message.delete(0, "end")
