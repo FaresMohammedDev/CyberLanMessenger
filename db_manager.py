@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-CYBER-LAN DATABASE MANAGER (SQLite)
+CYBER-LAN DATABASE MANAGER (SQLite) - v3.1
 Handles persistent storage for messages, user profiles, favorite stickers,
-groups, ephemeral stories, and weekend-aware streaks.
+groups, ephemeral stories, weekend-aware streaks, and milestone analytics.
 """
 
 import os
@@ -12,6 +12,7 @@ import datetime
 from datetime import datetime as dt, date, timedelta
 
 DB_FILE = os.path.join(os.path.dirname(__file__), "cyber_lan.db")
+ADMIN_IP = "192.168.20.54"
 
 
 class DatabaseManager:
@@ -54,7 +55,7 @@ class DatabaseManager:
             )
             """)
 
-            # 3. Groups
+            # 3. Groups (Admin is mandatory member)
             cur.execute("""
             CREATE TABLE IF NOT EXISTS groups (
                 group_id TEXT PRIMARY KEY,
@@ -93,7 +94,7 @@ class DatabaseManager:
             # 6. Streaks (Public, Private pairs, Groups)
             cur.execute("""
             CREATE TABLE IF NOT EXISTS streaks (
-                streak_id TEXT PRIMARY KEY, -- 'PUBLIC', 'PRIV:<ip>', 'GRP:<id>'
+                streak_id TEXT PRIMARY KEY,
                 streak_type TEXT,
                 target_id TEXT,
                 count INTEGER DEFAULT 1,
@@ -103,7 +104,6 @@ class DatabaseManager:
 
             conn.commit()
 
-        # Seed default cyber stickers if table is empty
         self._seed_default_stickers()
 
     def _seed_default_stickers(self):
@@ -158,7 +158,7 @@ class DatabaseManager:
         self.set_setting("user_avatar", avatar)
         self.set_setting("user_bio", bio)
 
-    # --- Messages Methods ---
+    # --- Messages Methods (Limited to 50) ---
     def save_message(self, msg_uuid, sender_ip, sender_nick, target_type, target_id,
                      content, msg_type="TEXT", file_meta=None, reply_to=None, timestamp=None, is_me=0):
         if not timestamp:
@@ -178,29 +178,42 @@ class DatabaseManager:
             except Exception:
                 pass
 
-    def get_messages(self, target_type, target_id, limit=60):
+    def get_messages(self, target_type, target_id, limit=50):
+        """Returns the most recent 50 messages."""
         with self.get_connection() as conn:
             cur = conn.cursor()
             if target_type == "PUBLIC":
                 cur.execute("""
-                SELECT * FROM messages
-                WHERE target_type = 'PUBLIC'
-                ORDER BY id ASC LIMIT ?
+                SELECT * FROM (
+                    SELECT * FROM messages
+                    WHERE target_type = 'PUBLIC'
+                    ORDER BY id DESC LIMIT ?
+                ) ORDER BY id ASC
                 """, (limit,))
             elif target_type == "PRIVATE":
-                # Matches either to target_id or from target_id
                 cur.execute("""
-                SELECT * FROM messages
-                WHERE target_type = 'PRIVATE' AND (target_id = ? OR sender_ip = ?)
-                ORDER BY id ASC LIMIT ?
+                SELECT * FROM (
+                    SELECT * FROM messages
+                    WHERE target_type = 'PRIVATE' AND (target_id = ? OR sender_ip = ?)
+                    ORDER BY id DESC LIMIT ?
+                ) ORDER BY id ASC
                 """, (target_id, target_id, limit))
             elif target_type == "GROUP":
                 cur.execute("""
-                SELECT * FROM messages
-                WHERE target_type = 'GROUP' AND target_id = ?
-                ORDER BY id ASC LIMIT ?
+                SELECT * FROM (
+                    SELECT * FROM messages
+                    WHERE target_type = 'GROUP' AND target_id = ?
+                    ORDER BY id DESC LIMIT ?
+                ) ORDER BY id ASC
                 """, (target_id, limit))
             return [dict(r) for r in cur.fetchall()]
+
+    def get_total_messages_count(self):
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) as cnt FROM messages")
+            row = cur.fetchone()
+            return row["cnt"] if row else 0
 
     def clear_public_messages(self):
         with self.get_connection() as conn:
@@ -225,15 +238,16 @@ class DatabaseManager:
             )
             conn.commit()
 
-    # --- Groups Methods ---
+    # --- Groups Methods (Mandatory Admin Membership) ---
     def create_group(self, group_id, group_name, creator_ip, description=""):
         with self.get_connection() as conn:
             cur = conn.cursor()
             now = dt.now().strftime("%Y-%m-%d %H:%M:%S")
+            desc = f"{description} [Mandatory Admin: {ADMIN_IP}]"
             cur.execute("""
             INSERT OR REPLACE INTO groups (group_id, group_name, creator_ip, description, created_at)
             VALUES (?, ?, ?, ?, ?)
-            """, (group_id, group_name, creator_ip, description, now))
+            """, (group_id, group_name, creator_ip, desc, now))
             conn.commit()
 
     def get_groups(self):
@@ -265,11 +279,18 @@ class DatabaseManager:
             """, (now_str,))
             return [dict(r) for r in cur.fetchall()]
 
-    # --- Streaks Methods (Weekend-Aware) ---
+    def delete_story(self, story_id):
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM stories WHERE story_id = ?", (story_id,))
+            conn.commit()
+
+    # --- Streaks Methods (Weekend-Aware + Milestones at 3 & 10) ---
     def record_streak_interaction(self, streak_type, target_id):
         """
         Updates streak count according to 24h rule,
-        with special exemption: Friday (4) and Saturday (5) do NOT break the streak!
+        with Friday (4) and Saturday (5) exempted from streak breaks.
+        Returns: (new_count, is_milestone)
         """
         streak_id = f"{streak_type}:{target_id}"
         now = dt.now()
@@ -282,37 +303,30 @@ class DatabaseManager:
             row = cur.fetchone()
 
             if not row:
-                # First interaction
                 cur.execute(
                     "INSERT INTO streaks (streak_id, streak_type, target_id, count, last_interaction) VALUES (?, ?, ?, 1, ?)",
                     (streak_id, streak_type, target_id, now_iso)
                 )
                 conn.commit()
-                return 1
+                return 1, False
 
             last_dt = dt.fromisoformat(row["last_interaction"])
             last_date = last_dt.date()
             current_count = row["count"]
 
-            # Same calendar day interaction -> maintain count, update timestamp
             if today == last_date:
                 cur.execute("UPDATE streaks SET last_interaction = ? WHERE streak_id = ?", (now_iso, streak_id))
                 conn.commit()
-                return current_count
+                return current_count, False
 
-            # Check days elapsed between interactions
             days_diff = (today - last_date).days
-
-            # If consecutive calendar day -> increment streak!
             if days_diff == 1:
                 new_count = current_count + 1
             else:
-                # Check if all skipped days between last_date and today were Friday (weekday 4) or Saturday (weekday 5)
-                # Note in Python datetime: Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5, Sunday=6
                 all_weekend = True
                 check_date = last_date + timedelta(days=1)
                 while check_date < today:
-                    if check_date.weekday() not in (4, 5): # Neither Friday nor Saturday
+                    if check_date.weekday() not in (4, 5):
                         all_weekend = False
                         break
                     check_date += timedelta(days=1)
@@ -320,26 +334,39 @@ class DatabaseManager:
                 if all_weekend:
                     new_count = current_count + 1
                 else:
-                    new_count = 1  # Reset streak
+                    new_count = 1
 
             cur.execute(
                 "UPDATE streaks SET count = ?, last_interaction = ? WHERE streak_id = ?",
                 (new_count, now_iso, streak_id)
             )
             conn.commit()
-            return new_count
 
-    def get_streak(self, streak_type, target_id):
+            # Milestones: 3, 10, 20, 30, etc.
+            is_milestone = (new_count in (3, 10) or (new_count > 10 and new_count % 10 == 0))
+            return new_count, is_milestone
+
+    def get_streak_status(self, streak_type, target_id):
+        """
+        Returns (count, hours_left, is_warning_4h, is_weekend_frozen)
+        """
         streak_id = f"{streak_type}:{target_id}"
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT * FROM streaks WHERE streak_id = ?", (streak_id,))
             row = cur.fetchone()
             if not row:
-                return 0, None
-            return row["count"], row["last_interaction"]
+                return 0, 24, False, False
 
+            count = row["count"]
+            last_dt = dt.fromisoformat(row["last_interaction"])
+            now = dt.now()
 
-if __name__ == "__main__":
-    db = DatabaseManager()
-    print("Database initialized successfully at:", db.db_path)
+            # Check if today is Friday (4) or Saturday (5) -> Frozen!
+            if now.weekday() in (4, 5):
+                return count, 24, False, True
+
+            elapsed_hours = (now - last_dt).total_seconds() / 3600.0
+            hours_left = max(0.0, 24.0 - elapsed_hours)
+            is_warning_4h = (hours_left <= 4.0 and hours_left > 0.0)
+            return count, round(hours_left, 1), is_warning_4h, False
