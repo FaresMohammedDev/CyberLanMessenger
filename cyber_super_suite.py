@@ -773,7 +773,7 @@ class CyberSuperSuiteApp:
 
         tk.Button(box, text="💾 Save Profile to Database", bg="#02381b", fg=COLOR_GREEN, font=FONT_BOLD, padx=15, pady=6, command=save_p).pack(pady=(0, 15))
 
-    # ----------------- CHAT & FILE MESSAGING (50 LIMIT & MILESTONES) -----------------
+    # ----------------- CHAT & INTERACTIVE ATTACHMENTS -----------------
     def load_history_for_active_view(self):
         if not hasattr(self, "txt_messages"): return
         self.txt_messages.delete("1.0", "end")
@@ -789,15 +789,176 @@ class CyberSuperSuiteApp:
             reply_to = m["reply_to"]
             content = m["content"]
             is_me = m["is_me"]
+            mtype = m.get("msg_type", "TEXT")
+            fmeta = m.get("file_meta")
 
-            self.txt_messages.insert("end", f"[{ts[-8:]}] ", "TIME")
-            tag = "ME_TAG" if is_me else "PEER_TAG"
-            self.txt_messages.insert("end", f"<{sender}>", tag)
-            if reply_to:
-                self.txt_messages.insert("end", f" ↳ (Replying to @{reply_to})", "REPLY_BADGE")
+            self.render_single_message(sender, content, ts, is_me, reply_to, mtype, fmeta)
+
+        self.txt_messages.see("end")
+
+    def render_single_message(self, sender, content, ts, is_me, reply_to=None, mtype="TEXT", file_meta=None):
+        if not hasattr(self, "txt_messages"): return
+
+        # Parse file_meta if string
+        if file_meta and isinstance(file_meta, str):
+            try:
+                file_meta = json.loads(file_meta)
+            except Exception:
+                file_meta = None
+
+        # Fallback detection for older attachment text formats
+        if (mtype == "FILE" or "FILE ATTACHMENT:" in content) and not file_meta:
+            import re
+            m = re.search(r"FILE ATTACHMENT:\s*([^\s(]+)", content)
+            if m:
+                fname = m.group(1).strip()
+                file_meta = {
+                    "filename": fname,
+                    "size_mb": 0.04,
+                    "url": f"http://{self.local_ip}:{self.media_port}/files/{fname}"
+                }
+
+        # Timestamp and Sender header
+        self.txt_messages.insert("end", f"[{ts[-8:]}] ", "TIME")
+        tag = "ME_TAG" if is_me else "PEER_TAG"
+        self.txt_messages.insert("end", f"<{sender}>", tag)
+        if reply_to:
+            self.txt_messages.insert("end", f" ↳ (Replying to @{reply_to})", "REPLY_BADGE")
+
+        if mtype == "FILE" or file_meta:
+            self.txt_messages.insert("end", ":\n")
+            self._insert_file_attachment_card(file_meta)
+            self.txt_messages.insert("end", "\n")
+        else:
             self.txt_messages.insert("end", f": {content}\n")
 
         self.txt_messages.see("end")
+
+    def _insert_file_attachment_card(self, file_meta):
+        if not file_meta: return
+        filename = file_meta.get("filename", "file")
+        size_mb = file_meta.get("size_mb", 0.0)
+
+        ext = os.path.splitext(filename)[1].lower()
+        is_img = ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+        is_vid = ext in (".mp4", ".webm", ".mkv", ".avi")
+        is_doc = ext in (".pdf", ".docx", ".pptx", ".txt", ".xlsx")
+
+        if is_img:
+            icon = "🖼️"
+            type_label = "IMAGE // صورة"
+            open_btn_text = "👁️ عرض وفتح الصورة"
+        elif is_vid:
+            icon = "🎬"
+            type_label = "VIDEO // فيديو"
+            open_btn_text = "▶️ تشغيل الفيديو"
+        elif is_doc:
+            icon = "📄"
+            type_label = "DOCUMENT // مستند"
+            open_btn_text = "📖 فتح المستند"
+        else:
+            icon = "📁"
+            type_label = "FILE // ملف"
+            open_btn_text = "📥 فتح الملف"
+
+        # Interactive Cyber Card Frame inside Chat
+        card = tk.Frame(self.txt_messages, bg="#0b172a", bd=1, relief="solid", highlightbackground=COLOR_CYAN, padx=12, pady=8)
+
+        # Header inside Card
+        hdr_frame = tk.Frame(card, bg="#0b172a")
+        hdr_frame.pack(fill="x", pady=(0, 6))
+
+        tk.Label(
+            hdr_frame, text=f"{icon} {filename}",
+            fg=COLOR_GREEN, bg="#0b172a", font=("Segoe UI", 11, "bold")
+        ).pack(side="left")
+
+        tk.Label(
+            hdr_frame, text=f"[{size_mb} MB]  ● {type_label}",
+            fg=COLOR_YELLOW, bg="#0b172a", font=("Consolas", 9)
+        ).pack(side="right", padx=10)
+
+        # Buttons row
+        btn_row = tk.Frame(card, bg="#0b172a")
+        btn_row.pack(fill="x", pady=(2, 0))
+
+        btn_open = tk.Button(
+            btn_row, text=open_btn_text,
+            bg="#02381b", fg=COLOR_GREEN, activebackground="#056b34", activeforeground="#ffffff",
+            font=FONT_BOLD, bd=1, relief="solid", padx=14, pady=4, cursor="hand2"
+        )
+        btn_open.config(command=lambda fm=file_meta, b=btn_open: self.open_or_download_attachment(fm, b))
+        btn_open.pack(side="left", padx=(0, 8))
+
+        btn_folder = tk.Button(
+            btn_row, text="📂 فتح في المجلد",
+            bg="#1e293b", fg="#7dd3fc", activebackground="#334155", activeforeground="#ffffff",
+            font=FONT_MAIN, bd=1, relief="solid", padx=10, pady=4, cursor="hand2",
+            command=lambda fm=file_meta: self.open_file_folder(fm)
+        )
+        btn_folder.pack(side="left")
+
+        # Embed Card Widget into Text widget
+        self.txt_messages.window_create("end", window=card)
+
+    def open_or_download_attachment(self, file_meta, btn=None):
+        filename = file_meta.get("filename", "")
+        url = file_meta.get("url", "")
+
+        # 1. Check local media dir (sent by me)
+        local_path = os.path.join(MEDIA_DIR, filename)
+        if os.path.exists(local_path):
+            try:
+                os.startfile(os.path.abspath(local_path))
+                return
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open file: {e}")
+                return
+
+        # 2. Check downloads dir (already downloaded from peer)
+        dl_path = os.path.join(DOWNLOADS_DIR, filename)
+        if os.path.exists(dl_path):
+            try:
+                os.startfile(os.path.abspath(dl_path))
+                return
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open file: {e}")
+                return
+
+        # 3. Download from sender peer URL
+        if not url:
+            messagebox.showerror("Missing URL", "No download URL provided for this file.")
+            return
+
+        def download_worker():
+            if btn:
+                self.root.after(0, lambda: btn.config(text="⏳ جاري التحميل...", state="disabled"))
+            try:
+                import urllib.request
+                os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+                urllib.request.urlretrieve(url, dl_path)
+                if btn:
+                    self.root.after(0, lambda: btn.config(text="✅ تم الفتح", state="normal"))
+                self.root.after(0, lambda: os.startfile(os.path.abspath(dl_path)))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Download Error", f"فشل تحميل الملف من جهاز الزميل:\n{e}\n\nتأكد من فتح البرنامج على كلا الجهازين."))
+                if btn:
+                    self.root.after(0, lambda: btn.config(text="❌ إعادة المحاولة", state="normal"))
+
+        threading.Thread(target=download_worker, daemon=True).start()
+
+    def open_file_folder(self, file_meta):
+        filename = file_meta.get("filename", "")
+        local_path = os.path.join(MEDIA_DIR, filename)
+        dl_path = os.path.join(DOWNLOADS_DIR, filename)
+
+        target = local_path if os.path.exists(local_path) else dl_path
+        if os.path.exists(target):
+            import subprocess
+            subprocess.Popen(f'explorer /select,"{os.path.abspath(target)}"')
+        else:
+            os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+            os.startfile(os.path.abspath(DOWNLOADS_DIR))
 
     def send_chat_message(self, custom_text=None, msg_type="TEXT", file_meta=None):
         if self.is_room_muted and not self.is_admin:
@@ -844,11 +1005,7 @@ class CyberSuperSuiteApp:
         self.send_packet(pkt)
 
         if hasattr(self, "txt_messages"):
-            self.txt_messages.insert("end", f"[{ts[-8:]}] ", "TIME")
-            self.txt_messages.insert("end", f"<{self.my_nick}>", "ME_TAG")
-            if reply_to_nick:
-                self.txt_messages.insert("end", f" ↳ (Replying to @{reply_to_nick})", "REPLY_BADGE")
-            self.txt_messages.insert("end", f": {text}\n")
+            self.render_single_message(self.my_nick, text, ts, True, reply_to_nick, msg_type, file_meta)
             if is_milestone:
                 self.txt_messages.insert("end", f"🎉 [STREAK MILESTONE: {new_streak} DAYS! Total Messages: {tot_msgs}!]\n", "MILESTONE")
             self.txt_messages.see("end")
@@ -864,7 +1021,7 @@ class CyberSuperSuiteApp:
         if filepath:
             filename = os.path.basename(filepath)
             dest = os.path.join(MEDIA_DIR, filename)
-            if filepath != dest:
+            if os.path.abspath(filepath) != os.path.abspath(dest):
                 shutil.copy2(filepath, dest)
 
             file_size_mb = os.path.getsize(dest) / (1024 * 1024)
@@ -873,7 +1030,7 @@ class CyberSuperSuiteApp:
                 "size_mb": round(file_size_mb, 2),
                 "url": f"http://{self.local_ip}:{self.media_port}/files/{filename}"
             }
-            msg_text = f"📁 [FILE ATTACHMENT: {filename} ({file_meta['size_mb']} MB) - Click to Open]"
+            msg_text = f"📁 [FILE ATTACHMENT: {filename} ({file_meta['size_mb']} MB)]"
             self.send_chat_message(custom_text=msg_text, msg_type="FILE", file_meta=file_meta)
 
     # ----------------- REPLIES & STEALTH -----------------
